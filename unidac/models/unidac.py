@@ -8,15 +8,12 @@ import torch.nn.functional as F
 
 from unidac.models.dpt_decoder import DPTHead
 from unidac.models.scale_est import ScaleMapEstimation
-from unidac.models.scale_est_dinov2 import ScaleMapEstimation as ScaleMapEstimationDinov2
 
 class UniDAC(nn.Module):
     def __init__(
         self,
         pixel_encoder:nn.Module,
         pixel_decoder:nn.Module,
-        rel_loss: nn.Module,
-        metric_loss: nn.Module,
         rope_lat_weight: bool,
         scale_head: nn.Module,
         eps: float=1e-6,
@@ -25,14 +22,10 @@ class UniDAC(nn.Module):
         super().__init__()
         self.pixel_encoder = pixel_encoder
         self.pixel_decoder = pixel_decoder
-        self.rel_loss = rel_loss
-        self.metric_loss = metric_loss
         self.rope_lat_weight = rope_lat_weight
         self.scale_head = scale_head
         self.eps = eps
         
-        print("Rel.Loss: ", self.rel_loss.name)
-        print("Metric.Loss: ", self.metric_loss.name)
         print("RoPE-Lat-Weight: ", self.rope_lat_weight)
 
     def forward(
@@ -85,14 +78,6 @@ class UniDAC(nn.Module):
         feat_g = feat_cls[-1][0]
         scale_map = self.scale_head(feat_g, rel_depth=pred_rel_depth_norm.detach(), mask=mask_, lat_grid=lat_grid)
         pred_metric_depth = scale_map * (pred_rel_depth_norm.detach())
-
-        if gt is not None:
-            losses["opt"] = {
-                self.rel_loss.name + 'Rel': self.rel_loss.weight
-                * self.rel_loss(pred_rel_depth, target=gt, mask=mask.bool(), interpolate=True, rel=True),
-                self.metric_loss.name: self.metric_loss.weight
-                * self.metric_loss(pred_metric_depth, target=gt, mask=mask.bool(), interpolate=True),
-            }
 
         return (
             pred_metric_depth if pred_metric_depth.shape[1] == 1 else pred_metric_depth[:, :3],
@@ -156,45 +141,27 @@ class UniDAC(nn.Module):
         
         pixel_decoder = DPTHead(**config["model"]["pixel_decoder"])
 
-        mod = importlib.import_module("unidac.optimization.losses")
-        rel_loss = getattr(mod, config["training"]["loss"]["name"]).build(config)
-        metric_loss = getattr(mod, config["training"]["loss"]["name"]).build(config)
         try:
             img_H, img_W = config['data']['crop_size']
         except:
             img_H, img_W = config['data']['fwd_sz']
 
-        if 'dinov2' in config["model"]["pixel_encoder"]["name"]:
-            scale_head = ScaleMapEstimationDinov2(
-                embed_dim=pixel_encoder.embed_dim,
-                patch_size=pixel_encoder.patch_size,
-                num_heads=pixel_encoder.num_heads,
-                rope_embed=None,
-                mask_k_bias=True,
-                norm_layer="layernormbf16",
-                img_H=img_H,
-                img_W=img_W,
-                dino_state_dict=pixel_encoder.blocks[-1].state_dict()
-            )
-        else:
-            scale_head = ScaleMapEstimation(
-                embed_dim=pixel_encoder.embed_dim,
-                patch_size=pixel_encoder.patch_size,
-                num_heads=pixel_encoder.num_heads,
-                rope_embed=pixel_encoder.rope_embed if hasattr(pixel_encoder, 'rope_embed') else None,
-                mask_k_bias=True,
-                norm_layer="layernormbf16",
-                img_H=img_H,
-                img_W=img_W,
-                dino_state_dict=pixel_encoder.blocks[-1].state_dict()
-            )
+        scale_head = ScaleMapEstimation(
+            embed_dim=pixel_encoder.embed_dim,
+            patch_size=pixel_encoder.patch_size,
+            num_heads=pixel_encoder.num_heads,
+            rope_embed=pixel_encoder.rope_embed if hasattr(pixel_encoder, 'rope_embed') else None,
+            mask_k_bias=True,
+            norm_layer="layernormbf16",
+            img_H=img_H,
+            img_W=img_W,
+            dino_state_dict=pixel_encoder.blocks[-1].state_dict()
+        )
 
         return deepcopy(
             cls(
                 pixel_encoder=pixel_encoder,
                 pixel_decoder=pixel_decoder,
-                rel_loss=rel_loss,
-                metric_loss=metric_loss,
                 rope_lat_weight=rope_lat_weight,
                 scale_head=scale_head
             )
